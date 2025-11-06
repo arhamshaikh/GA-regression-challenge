@@ -163,17 +163,17 @@ You can visualize the training process with TensorBoard. To log training metrics
    Run the following command on the server where your model is training. This will start the TensorBoard service:
 
    ```bash
-   tensorboard --logdir=logs --port=6006
+   tensorboard --logdir=logs --port=6000
    ```
    
-   * `--port=6006` specifies the port to use (default is 6006).
+   * `--port=6000` specifies the port to use (default is 6006).
 
 2. **Map the server port to your local machine**:
 
    If you're connecting to the server remotely via SSH, you'll need to forward the TensorBoard port so you can access it locally. In your terminal (on your local machine), run:
 
    ```bash
-   ssh -L 6006:localhost:6006 user@server_ip
+   ssh -L -p 5555 6000:localhost:6000 user@server_ip
    ```
 
    Replace `user@server_ip` with your actual username and server IP. This command forwards the server's port 6006 (where TensorBoard is running) to your local machine's port 6006.
