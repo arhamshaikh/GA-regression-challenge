@@ -16,8 +16,16 @@ imagenet_transform = T.Compose([
     T.Normalize(mean=[0.485, 0.456, 0.406],
                 std=[0.229, 0.224, 0.225])
 ])
-
-
+#------Trying data augmnentation -------------
+imagenet_transform = T.Compose([
+    T.ToTensor(),
+    T.Resize((224, 224)),
+    T.RandomHorizontalFlip(p=0.5),
+    T.RandomRotation(degrees=10),
+    T.ColorJitter(brightness=0.1, contrast=0.1),
+    T.Normalize(mean=[0.485, 0.456, 0.406],
+                std=[0.229, 0.224, 0.225])
+])
 # ----------------------------
 # Training dataset: single sweep per sample
 # ----------------------------
@@ -74,10 +82,67 @@ class SweepDataset(Dataset):
 # ----------------------------
 # Validation/Test dataset: multiple sweeps per sample
 # ----------------------------
+# class SweepEvalDataset(Dataset):
+#     """
+#     Dataset class for validation and testing.
+#     Each sample contains multiple sweeps per study.
+#     """
+#     def __init__(self, csv_path, n_sweeps=None, transform=None, load_nifti=True):
+#         self.df = pd.read_csv(csv_path)
+#         self.transform = transform
+#         self.load_nifti = load_nifti
+#         self.sweep_cols = [c for c in self.df.columns if c.startswith('path_nifti')]
+#         self.n_sweeps = n_sweeps
+
+#     def __len__(self):
+#         return len(self.df)
+
+#     def __getitem__(self, idx):
+#         row = self.df.iloc[idx]
+#         sweeps = row[self.sweep_cols].tolist()
+#         if self.n_sweeps:
+#             sweeps = sweeps[:self.n_sweeps]
+
+#         all_sweeps = []
+#         for path in sweeps:
+#             if self.load_nifti:
+#                 img = nib.load(path).get_fdata().astype(np.float32)
+#                 target_frames = 16
+#                 # target_frames = 32
+#                 # target_frames = 64 
+#                 num_frames = img.shape[-1]
+
+#                 if num_frames >= target_frames:
+#                     indices = np.linspace(0, num_frames - 1, target_frames, dtype=int)
+#                     sampled_img = img[..., indices]
+#                 else:
+#                     repeat_factor = int(np.ceil(target_frames / num_frames))
+#                     repeated_img = np.tile(img, (1, 1, 1, repeat_factor))
+#                     sampled_img = repeated_img[..., :target_frames]
+#                 img = sampled_img
+
+#                 # Apply transforms
+#                 frames = []
+#                 for f in range(img.shape[-1]):
+#                     frame = np.repeat(img[:, :, :, f], 3, axis=2)
+#                     if self.transform:
+#                         frame = self.transform(frame)
+#                     frames.append(frame)
+#                 frames = torch.stack(frames, dim=0)  # (T, C, H, W)
+#             else:
+#                 frames = path
+
+#             all_sweeps.append(frames)
+
+#         all_sweeps = torch.stack(all_sweeps, dim=0)  # (num_sweeps, T, C, H, W)
+#         label = torch.tensor(row['ga'], dtype=torch.float32)
+#         return all_sweeps, label
+
 class SweepEvalDataset(Dataset):
     """
     Dataset class for validation and testing.
     Each sample contains multiple sweeps per study.
+    Works for both val (with GA) and test (without GA).
     """
     def __init__(self, csv_path, n_sweeps=None, transform=None, load_nifti=True):
         self.df = pd.read_csv(csv_path)
@@ -86,11 +151,15 @@ class SweepEvalDataset(Dataset):
         self.sweep_cols = [c for c in self.df.columns if c.startswith('path_nifti')]
         self.n_sweeps = n_sweeps
 
+        # Check if GA column exists (test CSVs do not have it)
+        self.has_label = "ga" in self.df.columns
+
     def __len__(self):
         return len(self.df)
 
     def __getitem__(self, idx):
         row = self.df.iloc[idx]
+
         sweeps = row[self.sweep_cols].tolist()
         if self.n_sweeps:
             sweeps = sweeps[:self.n_sweeps]
@@ -109,22 +178,29 @@ class SweepEvalDataset(Dataset):
                     repeat_factor = int(np.ceil(target_frames / num_frames))
                     repeated_img = np.tile(img, (1, 1, 1, repeat_factor))
                     sampled_img = repeated_img[..., :target_frames]
+
                 img = sampled_img
 
-                # Apply transforms
+                # Apply transforms frame-by-frame
                 frames = []
                 for f in range(img.shape[-1]):
                     frame = np.repeat(img[:, :, :, f], 3, axis=2)
                     if self.transform:
                         frame = self.transform(frame)
                     frames.append(frame)
-                frames = torch.stack(frames, dim=0)  # (T, C, H, W)
+                frames = torch.stack(frames, dim=0)
             else:
                 frames = path
 
             all_sweeps.append(frames)
 
-        all_sweeps = torch.stack(all_sweeps, dim=0)  # (num_sweeps, T, C, H, W)
-        label = torch.tensor(row['ga'], dtype=torch.float32)
-        return all_sweeps, label
+        all_sweeps = torch.stack(all_sweeps, dim=0)
 
+        # If GA exists → return real label
+        # If not (test mode) → return dummy label
+        if self.has_label:
+            label = torch.tensor(row["ga"], dtype=torch.float32)
+        else:
+            label = torch.tensor(-1.0, dtype=torch.float32)
+
+        return all_sweeps, label

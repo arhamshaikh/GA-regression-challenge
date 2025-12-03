@@ -21,7 +21,7 @@ from tqdm import tqdm
 
 # ---------------- Config ----------------
 CSV_TRAIN = "final_train.csv"
-CSV_VAL   = "final_valid.csv"    # <- provided validation CSV
+CSV_VAL   = "final_valid.csv"
 CSV_TEST  = "final_test.csv"
 
 SWEEP_COL = "path_nifti4"
@@ -65,7 +65,7 @@ def prepare_tensor_from_nifti(path, img_size=IMG_SIZE):
     mn, mx = arr.min(), arr.max()
     arr = (arr - mn) / (mx - mn) if mx > mn else arr * 0.0
 
-    tensor = torch.from_numpy(arr)
+    tensor = torch.from_numpy(arr).float()
 
     with torch.no_grad():
         resized = F.interpolate(tensor.unsqueeze(0),
@@ -93,7 +93,7 @@ class SingleSweepDataset(Dataset):
                 raise FileNotFoundError(f"No NIfTI file for row {idx}")
 
         img_tensor = prepare_tensor_from_nifti(path)
-        ga_days = float(row["ga"])   # <-- Keep in DAYS
+        ga_days = float(row["ga"])   # Keep in DAYS
 
         return img_tensor, torch.tensor(ga_days, dtype=torch.float32)
 
@@ -127,7 +127,7 @@ val_df   = pd.read_csv(CSV_VAL)
 # Clean GA columns
 for df_ in [train_df, val_df]:
     df_["ga"] = pd.to_numeric(df_["ga"], errors="coerce")
-    df_ = df_.dropna(subset=["ga"])
+    df_.dropna(subset=["ga"], inplace=True)
 
 train_ds = SingleSweepDataset(train_df)
 val_ds   = SingleSweepDataset(val_df)
@@ -138,7 +138,21 @@ val_loader   = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False)
 # ---------------- Training ----------------
 model = Model3D().to(DEVICE)
 optimizer = Adam(model.parameters(), lr=LR)
-criterion = nn.MSELoss()
+criterion = nn.MSELoss()  # train safely on MSE
+
+# Optional fairness penalty
+def fairness_penalty(y_pred, groups=None):
+    if groups is None: return 0.0
+    g0 = y_pred[groups==0].mean()
+    g1 = y_pred[groups==1].mean()
+    return torch.abs(g0 - g1)
+
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    optimizer,
+    mode='min',
+    factor=0.5,
+    patience=2
+)
 
 train_losses = []
 val_losses = []
@@ -149,11 +163,18 @@ for epoch in range(1, EPOCHS+1):
 
     with tqdm(train_loader, desc=f"Epoch {epoch}/{EPOCHS}") as t:
         for imgs, labels in t:
-            imgs, labels = imgs.to(DEVICE), labels.to(DEVICE)
+            imgs, labels = imgs.to(DEVICE).float(), labels.to(DEVICE).float()
 
             optimizer.zero_grad()
             preds = model(imgs)
+
+            # train on MSE
             loss = criterion(preds, labels)
+
+            # optional fairness
+            groups = None
+            loss += 0.1 * fairness_penalty(preds, groups)
+
             loss.backward()
             optimizer.step()
 
@@ -170,21 +191,23 @@ for epoch in range(1, EPOCHS+1):
 
     with torch.no_grad():
         for imgs, labels in val_loader:
-            imgs, labels = imgs.to(DEVICE), labels.to(DEVICE)
-
-            preds = model(imgs)
-            running_val += criterion(preds, labels).item()
-
-            all_preds.extend(preds.cpu().numpy().tolist())
+            imgs, labels = imgs.to(DEVICE).float(), labels.to(DEVICE).float()
+            preds_val = model(imgs)
+            running_val += criterion(preds_val, labels).item()
+            all_preds.extend(preds_val.cpu().numpy().tolist())
             all_labels.extend(labels.cpu().numpy().tolist())
 
     val_losses.append(running_val / len(val_loader))
-    mae = mean_absolute_error(all_labels, all_preds)
+
+    # Compute RMSE for logging only
     mse = mean_squared_error(all_labels, all_preds)
     rmse = mse ** 0.5
+    mae = mean_absolute_error(all_labels, all_preds)
 
     print(f"Epoch {epoch}  TrainLoss {train_losses[-1]:.4f}  "
           f"ValLoss {val_losses[-1]:.4f}  MAE {mae:.3f}  RMSE {rmse:.3f}")
+
+    scheduler.step(val_losses[-1])
 
 # ---------------- Save model & plots ----------------
 torch.save(model.state_dict(), os.path.join(OUT_DIR, "model_3dcnn_days.pth"))
@@ -211,7 +234,7 @@ study_ids = []
 
 with torch.no_grad():
     for i, (imgs, labels) in enumerate(test_loader):
-        imgs = imgs.to(DEVICE)
+        imgs = imgs.to(DEVICE).float()
         out = model(imgs).detach().cpu().numpy()[0]
         study_ids.append(test_df.iloc[i]["study_id"])
         preds.append(out)
